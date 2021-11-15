@@ -1,8 +1,31 @@
-import { createTaskQueue } from '../Misc'
+import { createTaskQueue, arrified, createStateNode, getTag } from '../Misc'
 
 const taskQueue = createTaskQueue()
 
 let subTask = null
+
+let pendingCommit = null
+
+/**
+ * 最外层的fiber对象
+ * @param {*} fiber
+ */
+const commitAllWork = (fiber) => {
+  fiber.effects.forEach((item) => {
+    if (item.effectTag === 'placement') {
+      let fiber = item
+      let parentFiber = item.parent
+
+      while (parentFiber.tag == 'class_component') {
+        parentFiber = parentFiber.parent
+      }
+
+      if (fiber.tag === 'host_component') {
+        parentFiber.parent.stateNode.appendChild(fiber.stateNode)
+      }
+    }
+  })
+}
 
 const getFirstTask = () => {
   /**
@@ -21,7 +44,86 @@ const getFirstTask = () => {
   }
 }
 
-const executeTask = (fiber) => {}
+const reconcileChildren = (fiber, children) => {
+  /**
+   * children 可能是对象，也坑是数组
+   * 将 children 转换成数组
+   */
+  const arrifiedChildren = arrified(children)
+
+  let index = 0
+  let numberOfElment = arrifiedChildren.length
+  let element = null
+  let newFiber = null
+  let prevFiber = null
+
+  while (index < numberOfElment) {
+    element = arrifiedChildren[index]
+    /**
+     * 子集 fiber 对象
+     */
+    newFiber = {
+      type: element.type,
+      props: element.props,
+      tag: getTag(element),
+      effects: [],
+      effectTag: 'placement', // 新增
+      parent: fiber, // 父级节点
+    }
+
+    newFiber.stateNode = createStateNode(newFiber)
+
+    // 为父级添加子级
+    if (index == 0) {
+      fiber.child = newFiber
+    } else {
+      // 位fiber添加下一个兄弟节点
+      prevFiber.sibling = newFiber
+    }
+    // 存储当前的fiber对象
+    prevFiber = newFiber
+    index++
+  }
+}
+
+/**
+ * 执行任务
+ * @param {*} fiber
+ */
+const executeTask = (fiber) => {
+  /**
+   * 构建子级fiber对象，类组件
+   */
+  if (fiber.tag === 'class_component') {
+    // 调用组件的实例对象的render
+    reconcileChildren(fiber, fiber.stateNode.render())
+  } else {
+    // 构建父级和父级的子集节点
+    reconcileChildren(fiber, fiber.props.children)
+  }
+
+  // 当子级还有子集的时候返回子级
+  if (fiber.child) {
+    return fiber.child
+  }
+  // 如果没有子级的时候
+  let currentExecutelyFiber = fiber
+  // 循环当前fiber的父级
+  while (currentExecutelyFiber.parent) {
+    currentExecutelyFiber.parent.effects =
+      currentExecutelyFiber.parent.effects.concat(
+        currentExecutelyFiber.effects.concat([currentExecutelyFiber])
+      )
+    // 存在当前fiber的兄弟节点， 则返回兄弟节点
+    if (currentExecutelyFiber.sibling) {
+      return currentExecutelyFiber.sibling
+    }
+    // 如果同级不存在，退回他的父级， 同时继续循环查询父级的同级
+    currentExecutelyFiber = currentExecutelyFiber.parent
+  }
+
+  pendingCommit = currentExecutelyFiber
+}
 
 const workLoop = (deadline) => {
   // 如果子任务不存在，获取子任务
@@ -35,6 +137,10 @@ const workLoop = (deadline) => {
   while (subTask && deadline.timeRemaining() > 1) {
     // 执行任务 返回新任务
     subTask = executeTask(subTask)
+  }
+  // 第二阶段
+  if (pendingCommit) {
+    commitAllWork(pendingCommit)
   }
 }
 
